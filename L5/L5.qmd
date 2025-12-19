@@ -1,0 +1,350 @@
+---
+title: "Использование технологии Yandex Query для анализа данных сетевой активности"
+format: 
+  md:
+    output-file: README.md
+---
+
+## Цель работы
+
+1. Получить знания о методах исследования радиоэлектронной обстановки;
+2. Составить представление о механизмах работы Wi-Fi сетей на канальном и сетевом уровне модели OSI;
+3. Закрепить практические навыки использования языка программирования R для обработки данных;
+4. Закрепить знания основных функций обработки данных экосистемы  языка R.
+
+## Исходные данные
+
+1. Rstudio Desktop;
+2. Интерпретатор языка R 4.1.
+
+### Решение
+
+1. Импортируйте данные.
+
+```{r}
+library(readr)
+library(dplyr)
+library(lubridate)
+library(janitor)
+
+temp_dir <- tempdir()
+download.file(
+  url = "https://storage.yandexcloud.net/dataset.ctfsec/P2_wifi_data.csv",
+  destfile = file.path(temp_dir, "P2_wifi_data.csv"),
+  mode = "wb"
+)
+
+wifi_ap <- read_csv(file.path(temp_dir, "P2_wifi_data.csv"),
+                      n_max = 167)
+clients <- read_csv(file.path(temp_dir, "P2_wifi_data.csv"),
+                      skip = 169)
+print(head(wifi_ap, 10))
+print(head(clients, 10))
+```
+
+2. Привести датасеты в вид “аккуратных данных”, преобразовать типы столбцов в соответствии с типом данных и посмотреть с помощью `glimpse`.
+
+```{r}
+wifi_ap_clean <- wifi_ap %>%
+  rename_with(~ gsub("\\s+", "_", .x)) %>%
+  rename(
+    bssid = BSSID,
+    first_time_seen = `First_time_seen`,
+    last_time_seen = `Last_time_seen`,
+    channel = channel,
+    speed = Speed,
+    privacy = Privacy,
+    cipher = Cipher,
+    authentication = Authentication,
+    power = Power,
+    beacons = `#_beacons`,
+    iv = `#_IV`,
+    lan_ip = LAN_IP,
+    id_length = `ID-length`,
+    essid = ESSID,
+    key = Key
+  ) %>%
+  mutate(
+    first_time_seen = as.POSIXct(first_time_seen, format = "%Y-%m-%d %H:%M:%S"),
+    last_time_seen = as.POSIXct(last_time_seen, format = "%Y-%m-%d %H:%M:%S"),
+    channel = as.integer(channel),
+    speed = as.integer(speed),
+    power = as.integer(power),
+    beacons = as.integer(beacons),
+    iv = as.integer(iv),
+    id_length = as.integer(id_length),
+    privacy = as.factor(privacy),
+    cipher = as.factor(cipher),
+    authentication = as.factor(authentication),
+    lan_ip = gsub("\\s+", "", lan_ip)
+  )
+
+print(head(wifi_ap_clean, 10))
+
+clients_clean <- clients %>%
+  rename_with(~ gsub("\\s+", "_", .x)) %>%
+  rename(
+    station_mac = Station_MAC,
+    first_time_seen = `First_time_seen`,
+    last_time_seen = `Last_time_seen`,
+    power = Power,
+    packets = `#_packets`,
+    bssid = BSSID,
+    probed_essids = `Probed_ESSIDs`
+  ) %>%
+  mutate(
+    first_time_seen = as.POSIXct(first_time_seen, format = "%Y-%m-%d %H:%M:%S"),
+    last_time_seen = as.POSIXct(last_time_seen, format = "%Y-%m-%d %H:%M:%S"),
+    power = as.integer(power),
+    packets = as.integer(packets),
+    bssid = ifelse(bssid == "(not associated)", NA, bssid)
+  )
+
+print(head(clients_clean, 10))
+```
+
+3. Определить небезопасные точки доступа (без шифрования – OPN)
+
+```{r}
+unsafe_ap <- wifi_ap_clean %>%
+  filter(privacy == "OPN")
+
+print(head(unsafe_ap, 10))
+```
+
+4. Определить производителя для каждого обнаруженного устройства
+
+```{r}
+library(httr)
+library(jsonlite)
+
+get_manufacturer_by_mac <- function(mac_address, timeout = 10) {
+  url <- paste0("https://www.macvendorlookup.com/api/v2/", mac_address)
+  tryCatch({
+    response <- httr::GET(
+      url,
+      httr::timeout(timeout),
+      httr::add_headers(
+        "User-Agent" = "Mozilla/5.0 (compatible; R script)"
+      )
+    )
+    if (httr::status_code(response) != 200) {
+      return(NULL)
+    }
+    
+    content <- httr::content(response, "text", encoding = "UTF-8")
+    data <- jsonlite::fromJSON(content)
+    if (length(data) == 0 || is.null(data$company) || data$company == "") {
+      return(NULL)
+    }
+    return(data$company[1])
+    
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+wifi_ap_clean$manufacturer <- sapply(wifi_ap_clean$bssid, function(mac) {
+  result <- get_manufacturer_by_mac(mac)
+  if (is.null(result)) {
+    return(NA)
+  } else {
+    return(result)
+  }
+})
+
+print(head(wifi_ap_clean, 10))
+```
+
+5. Выявить устройства, использующие последнюю версию протокола шифрования WPA3, и названия точек доступа, реализованных на этих устройствах
+
+```{r}
+wifi_wpa3_ap <- wifi_ap_clean %>% filter(grepl("WPA3", privacy))
+print(head(wifi_wpa3_ap, 10))
+```
+
+6. Отсортировать точки доступа по интервалу времени, в течение которого они находились на связи, по убыванию
+
+```{r}
+wifi_ap_clean <- wifi_ap_clean %>%
+  mutate(life_time = as.numeric(difftime(last_time_seen, first_time_seen, units = "mins"))) %>%
+  arrange(desc(life_time))
+
+print(head(wifi_ap_clean, 10))
+```
+
+7. Обнаружить топ-10 самых быстрых точек доступа
+
+```{r}
+top10_fastest <- wifi_ap_clean %>%
+  arrange(desc(speed)) %>%
+  head(10)
+print(top10_fastest)
+```
+
+8. Отсортировать точки доступа по частоте отправки запросов (beacons) в единицу времени по их убыванию
+
+```{r}
+print(wifi_ap_clean %>%
+  mutate(
+    beacons_per_minute = beacons / life_time
+  ) %>%
+  filter(life_time > 0) %>%
+  arrange(desc(beacons_per_minute)) %>%
+  select(essid, bssid, beacons_per_minute, beacons, life_time, first_time_seen, last_time_seen)
+  %>% head(10))
+```
+
+9. Определить производителя для каждого обнаруженного устройства
+
+```
+clients_clean$manufacturer <- sapply(clients_clean$station_mac, function(mac) {
+  result <- get_manufacturer_by_mac(mac)
+  if (is.null(result)) {
+    return(NA)
+  } else {
+    return(result)
+  }
+})
+
+print(clients_clean %>% head(10))
+```
+
+10. Обнаружить устройства, которые НЕ рандомизируют свой MAC адрес
+
+Выборка тех MAC-адресов, в которых второй бит первого байта не 1, то есть не управляемый на местном уровне, а регулируемый производителем.
+
+```{r}
+clients_strong <- clients_clean %>% filter(!substr(station_mac, 2,2) %in% c("2", "3", "6", "7", "A", "B", "E", "F"))
+print(head(clients_strong, 10))
+
+```
+
+11. Кластеризовать запросы от устройств к точкам доступа по их именам. Определить время появления устройства в зоне радиовидимости и время выхода его из нее
+
+```{r}
+library(tidyverse)
+
+all_networks <- clients_clean %>%
+  filter(!is.na(probed_essids) & probed_essids != "") %>%
+  distinct(probed_essids) %>%
+  pull(probed_essids)
+
+client_network_matrix <- clients_clean %>%
+  filter(!is.na(probed_essids) & probed_essids != "") %>%
+  group_by(station_mac, probed_essids) %>%
+  summarise(probed_count = n(), .groups = 'drop') %>%
+  pivot_wider(
+    names_from = probed_essids,
+    values_from = probed_count,
+    values_fill = 0,
+    names_prefix = "network_"
+  ) %>%
+  mutate(across(-station_mac, ~ replace_na(., 0)))
+
+network_frequency <- colSums(client_network_matrix[, -1] > 0)
+popular_networks <- names(network_frequency[network_frequency >= 5])
+
+client_network_filtered <- client_network_matrix %>%
+  select(station_mac, all_of(popular_networks))
+
+cluster_data <- client_network_filtered %>%
+  select(-station_mac) %>%
+  as.matrix()
+
+library(factoextra)
+
+fviz_nbclust(cluster_data, kmeans, method = "wss", k.max = 10) +
+  labs(title = "Метод локтя для определения числа кластеров")
+
+set.seed(123)
+k <- 4
+kmeans_result <- kmeans(cluster_data, centers = k, nstart = 25)
+
+client_network_filtered$cluster <- as.factor(kmeans_result$cluster)
+
+cluster_profiles <- client_network_filtered %>%
+  group_by(cluster) %>%
+  summarise(across(starts_with("network_"), mean)) %>%
+  pivot_longer(
+    cols = starts_with("network_"),
+    names_to = "network",
+    names_prefix = "network_",
+    values_to = "proportion"
+  ) %>%
+  group_by(cluster) %>%
+  arrange(cluster, desc(proportion)) %>%
+  slice_max(proportion, n = 5)
+
+ggplot(cluster_profiles, aes(x = reorder(network, proportion), y = proportion, fill = cluster)) +
+  geom_col() +
+  facet_wrap(~ cluster, scales = "free_y") +
+  coord_flip() +
+  labs(
+    title = "Топ-5 исследуемых сетей по кластерам",
+    x = "Сеть",
+    y = "Доля устройств в кластере, искавших сеть"
+  ) +
+  theme_minimal()
+```
+
+12. Оценить стабильность уровня сигнала внури кластера во времени. Выявить наиболее стабильный кластер
+
+```{r}
+clients_with_clusters <- clients_clean %>%
+  inner_join(client_network_filtered %>% select(station_mac, cluster), by = "station_mac") %>%
+  filter(!is.na(power) & power != -1)
+
+clients_analysis <- clients_with_clusters %>%
+  mutate(
+    hour = hour(first_time_seen),
+    time_bin = cut(hour, breaks = c(0, 6, 12, 18, 24), 
+                   labels = c("Ночь", "Утро", "День", "Вечер"))
+  )
+
+cluster_stability <- clients_analysis %>%
+  group_by(cluster) %>%
+  summarise(
+    n_measurements = n(),
+    mean_power = mean(power, na.rm = TRUE),
+    median_power = median(power, na.rm = TRUE),
+    sd_power = sd(power, na.rm = TRUE),
+    cv_power = sd_power / abs(mean_power),
+    min_power = min(power, na.rm = TRUE),
+    max_power = max(power, na.rm = TRUE),
+    range_power = max_power - min_power,
+    iqr_power = IQR(power, na.rm = TRUE),
+    q1_power = quantile(power, 0.25, na.rm = TRUE),
+    q3_power = quantile(power, 0.75, na.rm = TRUE)
+  ) %>%
+  arrange(cv_power)
+
+stability_ranking <- cluster_stability %>%
+  select(cluster, mean_power, sd_power, cv_power, range_power, iqr_power) %>%
+  mutate(
+    stability_score = 1/cv_power, 
+    rank_stability = rank(cv_power)  
+  ) %>%
+  arrange(rank_stability)
+
+cat("РЕЙТИНГ СТАБИЛЬНОСТИ КЛАСТЕРОВ:\n")
+print(stability_ranking)
+
+most_stable_cluster <- stability_ranking %>%
+  filter(rank_stability == 1)
+
+cat("\nСАМЫЙ СТАБИЛЬНЫЙ КЛАСТЕР:\n")
+cat("Кластер:", most_stable_cluster$cluster, "\n")
+cat("Средний уровень сигнала:", round(most_stable_cluster$mean_power, 2), "dBm\n")
+cat("Стандартное отклонение:", round(most_stable_cluster$sd_power, 2), "dBm\n")
+cat("Коэффициент вариации:", round(most_stable_cluster$cv_power, 3), "\n")
+cat("Размах:", most_stable_cluster$range_power, "dBm\n")
+```
+
+## Оценка результата
+
+В рамках практческой работы была исследована радиоэлектронная обстановка и составлено представление о механизмах работы Wi-Fi сетей на канальном и сетевом уровне модели OSI.
+
+## Вывод
+
+В практической работе мы использовали навыки написания кода на языке программирования R для обработки данных и закрепили знания основных функций обработки данных экосистемы tidyverse языка R.
+
