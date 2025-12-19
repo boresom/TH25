@@ -1,0 +1,109 @@
+---
+title: "Основы обработки данных с помощью R и Dplyr"
+format: 
+  md:
+    output-file: README.md
+---
+
+## Цель работы
+
+1. Развить практические навыки использования языка программирования R для обработки данных
+2. Закрепить знания базовых типов данных языка R
+3. Развить практические навыки использования функций обработки данных пакета dplyr – функции select(), filter(), mutate(), arrange(), group_by()
+
+## Исходные данные
+
+1. Rstudio Desktop;
+2. Интерпретатор языка R 4.1;
+3. Программный пакет `dplyr`.
+     
+       
+ 
+## План
+
+Проанализировать встроенный в пакет dplyr набор данных starwars с помощью языка R и ответить на вопросы.   
+
+## Решение:   
+
+```{r}
+library(dplyr)
+```
+
+
+1. Сколько строк в датафрейме?
+
+```
+> starwars %>% nrow()
+[1] 87
+```
+
+2. Сколько столбцов в датафрейме?
+
+```
+starwars %>% ncol()
+[1] 14
+```
+
+3. Как просмотреть примерный вид датафрейма?
+
+```{r}
+starwars %>% glimpse()
+```
+
+4. Сколько уникальных рас персонажей (species) представлено в данных?
+
+```{r}
+starwars %>% distinct(species) %>% nrow()
+```
+
+5. Найти самого высокого персонажа.
+
+```{r}
+starwars %>%
+  filter(height == max(height,na.rm = TRUE)) %>%
+  pull(name)
+```
+
+6. Найти всех персонажей ниже 170.
+
+```{r}
+select(starwars, name, height) %>% filter(height>170)
+```
+
+7. Подсчитать ИМТ (индекс массы тела) для всех персонажей. 
+
+```{r}
+mutate(starwars, BMI=mass/((height/100)^2)) %>% select(name, height, mass, BMI)
+```
+
+8. Найти 10 самых “вытянутых” персонажей. “Вытянутость” оценить по отношению массы (mass) к росту (height) персонажей.
+
+```{r}
+starwars %>% mutate(stretch_ratio = mass / height) %>% filter(!is.na(stretch_ratio)) %>% arrange(desc(stretch_ratio)) %>% head(10) %>% select(name, mass, height, stretch_ratio)
+```
+
+9. Найти средний возраст персонажей каждой расы вселенной Звездных войн.
+
+```{r}
+starwars %>% mutate(age = 100 + birth_year) %>% group_by(species) %>% summarise(avg_age = mean(age, na.rm = TRUE), count = n()) %>% filter(!is.na(avg_age)) %>% arrange(desc(avg_age))
+```
+
+10. Найти самый распространенный цвет глаз персонажей вселенной Звездных войн.
+
+```{r}
+starwars %>% count(eye_color, sort = TRUE) %>% filter(!is.na(eye_color)) %>% slice(1) %>% pull(eye_color)
+```
+
+11. Подсчитать среднюю длину имени в каждой расе вселенной Звездных войн.
+
+```{r}
+starwars %>% mutate(name_length = nchar(name)) %>% filter(!is.na(species)) %>% group_by(species) %>% summarise(avg_name_length = mean(name_length, na.rm = TRUE),count = n()) %>% arrange(desc(avg_name_length))
+```
+
+## Оценка результата
+
+ В результате лабораторной работы мы проанализировали встроенный в пакет dplyr набор данных starwars с помощью языка R.
+
+## Вывод
+
+Таким образом, мы развили практические навыки использования языка программирования R для обработки данных, закрепили знания базовых типов данных языка R, развили практические навыки использования функций обработки данных пакета dplyr – функции select(), filter(), mutate(), arrange(), group_by().
